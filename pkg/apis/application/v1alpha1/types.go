@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"fmt"
+	math "math"
 	"net"
 	"net/http"
 	"net/url"
@@ -450,6 +451,8 @@ type Operation struct {
 	Sync        *SyncOperation     `json:"sync,omitempty" protobuf:"bytes,1,opt,name=sync"`
 	InitiatedBy OperationInitiator `json:"initiatedBy,omitempty" protobuf:"bytes,2,opt,name=initiatedBy"`
 	Info        []*Info            `json:"info,omitempty" protobuf:"bytes,3,name=info"`
+	// Retry controls failed sync retry behavior
+	Retry RetryStrategy `json:"retry,omitempty" protobuf:"bytes,4,opt,name=retry"`
 }
 
 // SyncOperationResource contains resources to sync.
@@ -523,6 +526,8 @@ type OperationState struct {
 	StartedAt metav1.Time `json:"startedAt" protobuf:"bytes,6,opt,name=startedAt"`
 	// FinishedAt contains time of operation completion
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty" protobuf:"bytes,7,opt,name=finishedAt"`
+	// RetryCount contains time of operation retries
+	RetryCount int64 `json:"retryCount,omitempty" protobuf:"bytes,8,opt,name=retryCount"`
 }
 
 type Info struct {
@@ -565,10 +570,73 @@ type SyncPolicy struct {
 	Automated *SyncPolicyAutomated `json:"automated,omitempty" protobuf:"bytes,1,opt,name=automated"`
 	// Options allow you to specify whole app sync-options
 	SyncOptions SyncOptions `json:"syncOptions,omitempty" protobuf:"bytes,2,opt,name=syncOptions"`
+	// Retry controls failed sync retry behavior
+	Retry *RetryStrategy `json:"retry,omitempty" protobuf:"bytes,3,opt,name=retry"`
 }
 
 func (p *SyncPolicy) IsZero() bool {
 	return p == nil || (p.Automated == nil && len(p.SyncOptions) == 0)
+}
+
+type RetryStrategy struct {
+	// Limit is the maximum number of attempts when retrying a container
+	Limit int64 `json:"limit,omitempty" protobuf:"bytes,1,opt,name=limit"`
+
+	// Backoff is a backoff strategy
+	Backoff *Backoff `json:"backoff,omitempty" protobuf:"bytes,2,opt,name=backoff,casttype=Backoff"`
+}
+
+func parseStringToDuration(durationString string) (time.Duration, error) {
+	var suspendDuration time.Duration
+	// If no units are attached, treat as seconds
+	if val, err := strconv.Atoi(durationString); err == nil {
+		suspendDuration = time.Duration(val) * time.Second
+	} else if duration, err := time.ParseDuration(durationString); err == nil {
+		suspendDuration = duration
+	} else {
+		return 0, fmt.Errorf("unable to parse %s as a duration", durationString)
+	}
+	return suspendDuration, nil
+}
+
+func (r *RetryStrategy) NextRetryAt(lastAttempt time.Time, retryCounts int64) (time.Time, error) {
+	maxDuration := common.DefaultSyncRetryMaxDuration
+	duration := common.DefaultSyncRetryDuration
+	factor := common.DefaultSyncRetryFactor
+	var err error
+	if r.Backoff != nil {
+		if r.Backoff.Duration != "" {
+			if duration, err = parseStringToDuration(r.Backoff.Duration); err != nil {
+				return time.Time{}, err
+			}
+		}
+		if r.Backoff.MaxDuration != "" {
+			if maxDuration, err = parseStringToDuration(r.Backoff.MaxDuration); err != nil {
+				return time.Time{}, err
+			}
+		}
+		if r.Backoff.Factor != nil {
+			factor = *r.Backoff.Factor
+		}
+
+	}
+	// Formula: timeToWait = duration * factor^retry_number
+	// Note that timeToWait should equal to duration for the first retry attempt.
+	timeToWait := duration * time.Duration(math.Pow(float64(factor), float64(retryCounts)))
+	if maxDuration > 0 {
+		timeToWait = time.Duration(math.Min(float64(maxDuration), float64(timeToWait)))
+	}
+	return lastAttempt.Add(timeToWait), nil
+}
+
+// Backoff is a backoff strategy to use within retryStrategy
+type Backoff struct {
+	// Duration is the amount to back off. Default unit is seconds, but could also be a duration (e.g. "2m", "1h")
+	Duration string `json:"duration,omitempty" protobuf:"bytes,1,opt,name=duration"`
+	// Factor is a factor to multiply the base duration after each failed retry
+	Factor *int64 `json:"factor,omitempty" protobuf:"bytes,2,name=factor"`
+	// MaxDuration is the maximum amount of time allowed for the backoff strategy
+	MaxDuration string `json:"maxDuration,omitempty" protobuf:"bytes,3,opt,name=maxDuration"`
 }
 
 // SyncPolicyAutomated controls the behavior of an automated sync
@@ -967,7 +1035,7 @@ type Cluster struct {
 	// DEPRECATED: use Info.ServerVersion field instead.
 	// The server version
 	ServerVersion string `json:"serverVersion,omitempty" protobuf:"bytes,5,opt,name=serverVersion"`
-	// Holds list of namespaces which are accessible in that cluster. Cluster level resources would be ignored if namespace list if not empty.
+	// Holds list of namespaces which are accessible in that cluster. Cluster level resources would be ignored if namespace list is not empty.
 	Namespaces []string `json:"namespaces,omitempty" protobuf:"bytes,6,opt,name=namespaces"`
 	// RefreshRequestedAt holds time when cluster cache refresh has been requested
 	RefreshRequestedAt *metav1.Time `json:"refreshRequestedAt,omitempty" protobuf:"bytes,7,opt,name=refreshRequestedAt"`
@@ -1735,6 +1803,8 @@ type AppProjectSpec struct {
 	NamespaceResourceWhitelist []metav1.GroupKind `json:"namespaceResourceWhitelist,omitempty" protobuf:"bytes,9,opt,name=namespaceResourceWhitelist"`
 	// List of PGP key IDs that commits to be synced to must be signed with
 	SignatureKeys []SignatureKey `json:"signatureKeys,omitempty" protobuf:"bytes,10,opt,name=signatureKeys"`
+	// ClusterResourceBlacklist contains list of blacklisted cluster level resources
+	ClusterResourceBlacklist []metav1.GroupKind `json:"clusterResourceBlacklist,omitempty" protobuf:"bytes,11,opt,name=clusterResourceBlacklist"`
 }
 
 // SyncWindows is a collection of sync windows in this project
@@ -2243,14 +2313,18 @@ func isResourceInList(res metav1.GroupKind, list []metav1.GroupKind) bool {
 
 // IsGroupKindPermitted validates if the given resource group/kind is permitted to be deployed in the project
 func (proj AppProject) IsGroupKindPermitted(gk schema.GroupKind, namespaced bool) bool {
+	var isWhiteListed, isBlackListed bool
 	res := metav1.GroupKind{Group: gk.Group, Kind: gk.Kind}
+
 	if namespaced {
-		isWhiteListed := len(proj.Spec.NamespaceResourceWhitelist) == 0 || isResourceInList(res, proj.Spec.NamespaceResourceWhitelist)
-		isBlackListed := isResourceInList(res, proj.Spec.NamespaceResourceBlacklist)
+		isWhiteListed = len(proj.Spec.NamespaceResourceWhitelist) == 0 || isResourceInList(res, proj.Spec.NamespaceResourceWhitelist)
+		isBlackListed = isResourceInList(res, proj.Spec.NamespaceResourceBlacklist)
 		return isWhiteListed && !isBlackListed
-	} else {
-		return isResourceInList(res, proj.Spec.ClusterResourceWhitelist)
 	}
+
+	isWhiteListed = len(proj.Spec.ClusterResourceWhitelist) == 0 || isResourceInList(res, proj.Spec.ClusterResourceWhitelist)
+	isBlackListed = isResourceInList(res, proj.Spec.ClusterResourceBlacklist)
+	return isWhiteListed && !isBlackListed
 }
 
 func (proj AppProject) IsLiveResourcePermitted(un *unstructured.Unstructured, server string) bool {

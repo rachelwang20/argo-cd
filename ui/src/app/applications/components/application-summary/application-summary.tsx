@@ -1,12 +1,12 @@
 import {AutocompleteField, DropDownMenu, FormField, FormSelect, HelpIcon, PopupApi} from 'argo-ui';
 import * as React from 'react';
 import {FormApi, Text} from 'react-form';
-import {Cluster, clusterTitle, DataLoader, EditablePanel, EditablePanelItem, Expandable, MapInputField, Repo, Revision, RevisionHelpIcon} from '../../../shared/components';
+import {Cluster, DataLoader, EditablePanel, EditablePanelItem, Expandable, MapInputField, Repo, Revision, RevisionHelpIcon} from '../../../shared/components';
 import {Consumer} from '../../../shared/context';
 import * as models from '../../../shared/models';
 import {services} from '../../../shared/services';
 
-import {ApplicationSyncOptionsCreateNamespaceField, ApplicationSyncOptionsField} from '../application-sync-options';
+import {ApplicationSyncOptionsField} from '../application-sync-options';
 import {ComparisonStatusIcon, HealthStatusIcon, syncStatusMessage} from '../utils';
 
 require('./application-summary.scss');
@@ -28,9 +28,8 @@ function swap(array: any[], a: number, b: number) {
 export const ApplicationSummary = (props: {app: models.Application; updateApp: (app: models.Application) => Promise<any>}) => {
     const app = JSON.parse(JSON.stringify(props.app)) as models.Application;
     const isHelm = app.spec.source.hasOwnProperty('chart');
-    const isDestName = app.spec.destination.server === undefined;
-    const fieldDest = isDestName ? 'spec.destination.name' : 'spec.destination.server';
-
+    const initialState = app.spec.destination.server === undefined ? 'NAME' : 'URL';
+    const [destFormat, setDestFormat] = React.useState(initialState);
     const attributes = [
         {
             title: 'PROJECT',
@@ -63,16 +62,60 @@ export const ApplicationSummary = (props: {app: models.Application; updateApp: (
             title: 'CLUSTER',
             view: <Cluster server={app.spec.destination.server} name={app.spec.destination.name} showUrl={true} />,
             edit: (formApi: FormApi) => (
-                <DataLoader
-                    load={() =>
-                        services.clusters.list().then(clusters =>
-                            clusters.map(cluster => ({
-                                title: clusterTitle(cluster),
-                                value: isDestName ? cluster.name : cluster.server
-                            }))
-                        )
-                    }>
-                    {clusters => <FormField formApi={formApi} field={fieldDest} componentProps={{options: clusters}} component={FormSelect} />}
+                <DataLoader load={() => services.clusters.list().then(clusters => clusters.sort())}>
+                    {clusters => {
+                        return (
+                            <div className='row'>
+                                {(destFormat.toUpperCase() === 'URL' && (
+                                    <div className='columns small-10'>
+                                        <FormField
+                                            formApi={formApi}
+                                            field='spec.destination.server'
+                                            componentProps={{items: clusters.map(cluster => cluster.server)}}
+                                            component={AutocompleteField}
+                                        />
+                                    </div>
+                                )) || (
+                                    <div className='columns small-10'>
+                                        <FormField
+                                            formApi={formApi}
+                                            field='spec.destination.name'
+                                            componentProps={{items: clusters.map(cluster => cluster.name)}}
+                                            component={AutocompleteField}
+                                        />
+                                    </div>
+                                )}
+                                <div className='columns small-2'>
+                                    <div>
+                                        <DropDownMenu
+                                            anchor={() => (
+                                                <p>
+                                                    {destFormat.toUpperCase()} <i className='fa fa-caret-down' />
+                                                </p>
+                                            )}
+                                            items={['URL', 'NAME'].map((type: 'URL' | 'NAME') => ({
+                                                title: type,
+                                                action: () => {
+                                                    if (destFormat !== type) {
+                                                        const updatedApp = formApi.getFormState().values as models.Application;
+                                                        if (type === 'URL') {
+                                                            updatedApp.spec.destination.server = '';
+                                                            delete updatedApp.spec.destination.name;
+                                                        } else {
+                                                            updatedApp.spec.destination.name = '';
+                                                            delete updatedApp.spec.destination.server;
+                                                        }
+                                                        formApi.setAllValues(updatedApp);
+                                                        setDestFormat(type);
+                                                    }
+                                                }
+                                            }))}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    }}
                 </DataLoader>
             )
         },
@@ -128,7 +171,7 @@ export const ApplicationSummary = (props: {app: models.Application; updateApp: (
                                                           items: versions
                                                       }}
                                                   />
-                                                  <RevisionHelpIcon type='helm' />
+                                                  <RevisionHelpIcon type='helm' top='0' />
                                               </div>
                                           )}
                                       </DataLoader>
@@ -145,7 +188,7 @@ export const ApplicationSummary = (props: {app: models.Application; updateApp: (
                       edit: (formApi: FormApi) => (
                           <React.Fragment>
                               <FormField formApi={formApi} field='spec.source.targetRevision' component={Text} componentProps={{placeholder: 'HEAD'}} />
-                              <RevisionHelpIcon type='git' />{' '}
+                              <RevisionHelpIcon type='git' top='0' />{' '}
                           </React.Fragment>
                       )
                   },
@@ -160,17 +203,18 @@ export const ApplicationSummary = (props: {app: models.Application; updateApp: (
             title: 'REVISION HISTORY LIMIT',
             view: app.spec.revisionHistoryLimit,
             edit: (formApi: FormApi) => (
-                <React.Fragment>
+                <div style={{position: 'relative'}}>
                     <FormField formApi={formApi} field='spec.revisionHistoryLimit' component={Text} />
-                    <HelpIcon
-                        title='This limits this number of items kept in the apps revision history.
-This should only be changed in exceptional circumstances.
-Setting to zero will store no history. This will reduce storage used.
-Increasing will increase the space used to store the history, so we do not recommend increasing it.
-Default is 10.
-'
-                    />
-                </React.Fragment>
+                    <div style={{position: 'absolute', right: '0', top: '0'}}>
+                        <HelpIcon
+                            title='This limits this number of items kept in the apps revision history.
+    This should only be changed in exceptional circumstances.
+    Setting to zero will store no history. This will reduce storage used.
+    Increasing will increase the space used to store the history, so we do not recommend increasing it.
+    Default is 10.'
+                        />
+                    </div>
+                </div>
             )
         },
         {
@@ -179,7 +223,6 @@ Default is 10.
             edit: (formApi: FormApi) => (
                 <div>
                     <FormField formApi={formApi} field='spec.syncPolicy.syncOptions' component={ApplicationSyncOptionsField} />
-                    <FormField formApi={formApi} field='spec.syncPolicy.syncOptions' component={ApplicationSyncOptionsCreateNamespaceField} />
                 </div>
             )
         },
@@ -333,17 +376,11 @@ Default is 10.
         <div className='application-summary'>
             <EditablePanel
                 save={props.updateApp}
-                validate={input =>
-                    isDestName
-                        ? {
-                              'spec.project': !input.spec.project && 'Project name is required',
-                              'spec.destination.name': !input.spec.destination.name && 'Cluster is required'
-                          }
-                        : {
-                              'spec.project': !input.spec.project && 'Project name is required',
-                              'spec.destination.server': !input.spec.destination.server && 'Cluster is required'
-                          }
-                }
+                validate={input => ({
+                    'spec.project': !input.spec.project && 'Project name is required',
+                    'spec.destination.server': !input.spec.destination.server && input.spec.destination.hasOwnProperty('server') && 'Cluster server is required',
+                    'spec.destination.name': !input.spec.destination.name && input.spec.destination.hasOwnProperty('name') && 'Cluster name is required'
+                })}
                 values={app}
                 title={app.metadata.name.toLocaleUpperCase()}
                 items={attributes}

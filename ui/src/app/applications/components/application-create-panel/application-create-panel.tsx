@@ -2,11 +2,11 @@ import {AutocompleteField, Checkbox, DataLoader, DropDownMenu, FormField, HelpIc
 import * as deepMerge from 'deepmerge';
 import * as React from 'react';
 import {FieldApi, Form, FormApi, FormField as ReactFormField, Text} from 'react-form';
-import {clusterTitle, RevisionHelpIcon, YamlEditor} from '../../../shared/components';
+import {RevisionHelpIcon, YamlEditor} from '../../../shared/components';
 import * as models from '../../../shared/models';
 import {services} from '../../../shared/services';
 import {ApplicationParameters} from '../application-parameters/application-parameters';
-import {ApplicationSyncOptionsCreateNamespaceField, ApplicationSyncOptionsField} from '../application-sync-options';
+import {ApplicationSyncOptionsField} from '../application-sync-options';
 
 const jsonMergePatch = require('json-merge-patch');
 
@@ -62,13 +62,13 @@ const AutoSyncFormField = ReactFormField((props: {fieldApi: FieldApi; className:
             {automated && (
                 <div className='application-create-panel__sync-params'>
                     <div className='checkbox-container'>
-                        <Checkbox onChange={val => setValue({...automated, prune: val})} checked={automated.prune} id='policyPrune' />
+                        <Checkbox onChange={val => setValue({...automated, prune: val})} checked={!!automated.prune} id='policyPrune' />
                         <label htmlFor='policyPrune'>Prune Resources</label>
                         <HelpIcon title='If checked, Argo will delete resources if they are no longer defined in Git' />
                     </div>
                     <div className='checkbox-container'>
-                        <Checkbox onChange={val => setValue({...automated, selfHeal: val})} checked={automated.selfHeal} id='policySelfHeal' />
-                        <label htmlFor='selfHeal'>Self Heal</label>
+                        <Checkbox onChange={val => setValue({...automated, selfHeal: val})} checked={!!automated.selfHeal} id='policySelfHeal' />
+                        <label htmlFor='policySelfHeal'>Self Heal</label>
                         <HelpIcon title='If checked, Argo will force the state defined in Git into the cluster when a deviation in the cluster is detected' />
                     </div>
                 </div>
@@ -102,6 +102,7 @@ export const ApplicationCreatePanel = (props: {
 }) => {
     const [yamlMode, setYamlMode] = React.useState(false);
     const [explicitPathType, setExplicitPathType] = React.useState<{path: string; type: models.AppSourceType}>(null);
+    const [destFormat, setDestFormat] = React.useState('URL');
 
     function normalizeTypeFields(formApi: FormApi, type: models.AppSourceType) {
         const app = formApi.getFormState().values;
@@ -120,11 +121,7 @@ export const ApplicationCreatePanel = (props: {
                 load={() =>
                     Promise.all([
                         services.projects.list().then(projects => projects.map(proj => proj.metadata.name).sort()),
-                        services.clusters
-                            .list()
-                            .then(clusters =>
-                                clusters.map(cluster => ({label: clusterTitle(cluster), value: cluster.server})).sort((first, second) => first.label.localeCompare(second.label))
-                            ),
+                        services.clusters.list().then(clusters => clusters.sort()),
                         services.repos.list()
                     ]).then(([projects, clusters, reposInfo]) => ({projects, clusters, reposInfo}))
                 }>
@@ -158,7 +155,16 @@ export const ApplicationCreatePanel = (props: {
                                         'spec.source.targetRevision': !a.spec.source.targetRevision && a.spec.source.hasOwnProperty('chart') && 'Version is required',
                                         'spec.source.path': !a.spec.source.path && !a.spec.source.chart && 'Path is required',
                                         'spec.source.chart': !a.spec.source.path && !a.spec.source.chart && 'Chart is required',
-                                        'spec.destination.server': !a.spec.destination.server && 'Cluster is required'
+                                        // Verify cluster URL when there is no cluster name field or the name value is empty
+                                        'spec.destination.server':
+                                            !a.spec.destination.server &&
+                                            (!a.spec.destination.hasOwnProperty('name') || a.spec.destination.name === '') &&
+                                            'Cluster URL is required',
+                                        // Verify cluster name when there is no cluster URL field or the URL value is empty
+                                        'spec.destination.name':
+                                            !a.spec.destination.name &&
+                                            (!a.spec.destination.hasOwnProperty('server') || a.spec.destination.server === '') &&
+                                            'Cluster name is required'
                                     })}
                                     defaultValues={app}
                                     formDidUpdate={state => props.onAppChanged(state.values as any)}
@@ -191,7 +197,6 @@ export const ApplicationCreatePanel = (props: {
                                                 <div className='argo-form-row'>
                                                     <label>Sync Options</label>
                                                     <FormField formApi={api} field='spec.syncPolicy.syncOptions' component={ApplicationSyncOptionsField} />
-                                                    <FormField formApi={api} field='spec.syncPolicy.syncOptions' component={ApplicationSyncOptionsCreateNamespaceField} />
                                                 </div>
                                             </div>
                                         );
@@ -312,18 +317,57 @@ export const ApplicationCreatePanel = (props: {
                                                 )}
                                             </div>
                                         );
-
                                         const destinationPanel = () => (
                                             <div className='white-box'>
                                                 <p>DESTINATION</p>
-                                                <div className='argo-form-row'>
-                                                    <FormField
-                                                        formApi={api}
-                                                        label='Cluster'
-                                                        field='spec.destination.server'
-                                                        componentProps={{items: clusters}}
-                                                        component={AutocompleteField}
-                                                    />
+                                                <div className='row argo-form-row'>
+                                                    {(destFormat.toUpperCase() === 'URL' && (
+                                                        <div className='columns small-10'>
+                                                            <FormField
+                                                                formApi={api}
+                                                                label='Cluster URL'
+                                                                field='spec.destination.server'
+                                                                componentProps={{items: clusters.map(cluster => cluster.server)}}
+                                                                component={AutocompleteField}
+                                                            />
+                                                        </div>
+                                                    )) || (
+                                                        <div className='columns small-10'>
+                                                            <FormField
+                                                                formApi={api}
+                                                                label='Cluster Name'
+                                                                field='spec.destination.name'
+                                                                componentProps={{items: clusters.map(cluster => cluster.name)}}
+                                                                component={AutocompleteField}
+                                                            />
+                                                        </div>
+                                                    )}
+                                                    <div className='columns small-2'>
+                                                        <div style={{paddingTop: '1.5em'}}>
+                                                            <DropDownMenu
+                                                                anchor={() => (
+                                                                    <p>
+                                                                        {destFormat} <i className='fa fa-caret-down' />
+                                                                    </p>
+                                                                )}
+                                                                items={['URL', 'NAME'].map((type: 'URL' | 'NAME') => ({
+                                                                    title: type,
+                                                                    action: () => {
+                                                                        if (destFormat !== type) {
+                                                                            const updatedApp = api.getFormState().values as models.Application;
+                                                                            if (type === 'URL') {
+                                                                                delete updatedApp.spec.destination.name;
+                                                                            } else {
+                                                                                delete updatedApp.spec.destination.server;
+                                                                            }
+                                                                            api.setAllValues(updatedApp);
+                                                                            setDestFormat(type);
+                                                                        }
+                                                                    }
+                                                                }))}
+                                                            />
+                                                        </div>
+                                                    </div>
                                                 </div>
                                                 <div className='argo-form-row'>
                                                     <FormField formApi={api} label='Namespace' field='spec.destination.namespace' component={Text} />

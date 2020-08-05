@@ -1353,3 +1353,33 @@ func TestNamespaceAutoCreation(t *testing.T) {
 			assert.Contains(t, output, updatedNamespace)
 		})
 }
+
+func TestFailedSyncWithRetry(t *testing.T) {
+	Given(t).
+		Path(guestbookPath).
+		When().
+		// app should be attempted to auto-synced once and marked with error after failed attempt detected
+		PatchFile("guestbook-ui-deployment.yaml", `[{"op": "replace", "path": "/spec/revisionHistoryLimit", "value": "badValue"}]`).
+		Create().
+		IgnoreErrors().
+		Sync("--retry-limit=1", "--retry-backoff-duration=1s").
+		Then().
+		Expect(OperationPhaseIs(OperationFailed)).
+		Expect(OperationMessageContains("retried 1 times"))
+}
+
+func TestCreateDisableValidation(t *testing.T) {
+	Given(t).
+		Path("baddir").
+		When().
+		Create("--validate=false").
+		Then().
+		And(func(app *Application) {
+			_, err := RunCli("app", "create", app.Name, "--upsert", "--validate=false", "--repo", RepoURL(RepoURLTypeFile),
+				"--path", "baddir2", "--project", app.Spec.Project, "--dest-server", common.KubernetesInternalAPIServerAddr, "--dest-namespace", DeploymentNamespace())
+			assert.NoError(t, err)
+		}).
+		When().
+		AppSet("--path", "baddir3", "--validate=false")
+
+}
